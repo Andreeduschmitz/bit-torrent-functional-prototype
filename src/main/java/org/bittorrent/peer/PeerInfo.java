@@ -3,6 +3,7 @@ package org.bittorrent.peer;
 import java.util.Set;
 
 public class PeerInfo {
+    private final String peerAddress;
     private final String ip;
     private final int port;
     private Set<String> pieces;
@@ -13,6 +14,11 @@ public class PeerInfo {
         this.port = port;
         this.pieces = pieces;
         this.lastSeen = System.currentTimeMillis();
+        this.peerAddress = ip + ":" + port;
+    }
+
+    public String getPeerAddress() {
+        return peerAddress;
     }
 
     public String getIp() {

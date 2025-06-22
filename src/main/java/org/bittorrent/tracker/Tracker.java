@@ -2,6 +2,7 @@ package org.bittorrent.tracker;
 
 import org.bittorrent.message.DataType;
 import org.bittorrent.message.RequestMessage;
+import org.bittorrent.message.RequestType;
 import org.bittorrent.peer.PeerInfo;
 
 import java.io.ByteArrayInputStream;
@@ -11,6 +12,7 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -35,8 +37,10 @@ public class Tracker {
             while (true) {
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 this.socket.receive(packet);
-                InetAddress clientAddress = packet.getAddress();
                 byte[] requestMessage = Arrays.copyOf(packet.getData(), packet.getLength());
+
+                // IP e porta usados somente para log, para lógica usado IP e Porta da mensagem
+                InetAddress clientAddress = packet.getAddress();
                 int clientPort = packet.getPort();
 
                 handleMessage(requestMessage, clientAddress.getHostAddress(), clientPort);
@@ -62,72 +66,86 @@ public class Tracker {
             return;
         }
 
+        RequestMessage response;
+
         switch (request.getRequestType()) {
             case JOIN_TRACKER:
-                handleJoin(request);
+                response = handleJoin(request);
                 break;
             case UPDATE_TRACKER:
-                handleUpdate(request);
+                response = handleUpdate(request);
                 break;
-
             default:
                 // Mensagem de erro
         }
     }
 
-    private void handleJoin(RequestMessage request) {
-        // Quando um novo peer entra, ele pode ou não ter peças.
-        // O primeiro 'join' é tratado como uma solicitação de lista.
-        // A lógica de atualização cuidará de adicionar as peças.
-        sendPeerList(request.get);
+    private RequestMessage handleJoin(RequestMessage request) {
+        this.registerPeer(request);
+        return this.sendPeerList(request);
     }
 
-    private void handleUpdate(RequestMessage request) {
-        Map<String, PeerInfo> peers = this.peers.get(torrentName);
-        String peerAddress = clientIp + ":" + clientPort;
+    private RequestMessage handleUpdate(RequestMessage request) {
+        String peerAddress = this.generateAddressFromRequest(request);
 
-        Set<String> pieces = Arrays.stream(piecesStr.split(","))
-                .filter(s -> !s.isEmpty())
-                .collect(Collectors.toSet());
+        List<String> peerPieces = (List<String>) request.getData().get(DataType.PIECE_LIST);
 
-        PeerInfo peerInfo = peers.get(peerAddress);
+        PeerInfo peerInfo = this.peers.get(peerAddress);
+
         if (peerInfo == null) {
-            // Novo peer se junta com suas peças iniciais
-            peerInfo = new PeerInfo(clientIp, clientPort, pieces);
-            peers.put(peerAddress, peerInfo);
-            System.out.println("Novo peer adicionado: " + peerAddress + " com peças: " + piecesStr);
+            this.registerPeer(request);
         } else {
-            // Peer existente atualiza sua lista de peças
             peerInfo.getPieces().clear();
-            peerInfo.getPieces().addAll(pieces);
+            peerInfo.getPieces().addAll(peerPieces);
             peerInfo.setLastSeen(System.currentTimeMillis());
-            System.out.println("Peer atualizado: " + peerAddress + " com peças: " + piecesStr);
+            System.out.println("Peer atualizado: " + peerAddress + " com peças: " + peerPieces);
         }
 
-        // Após uma atualização, envia a lista atualizada de peers para o solicitante
-        sendPeerList(torrentName, clientIp, clientPort);
+
+        return sendPeerList(request);
     }
 
     private void registerPeer(RequestMessage request) {
+        String peerIp = (String) request.getData().get(DataType.IP);
+        int peerPort = (int) request.getData().get(DataType.PORT);
+        String peerAddress = peerIp + ":" + peerPort;
+        Set<String> piecesList = (Set<String>) request.getData().get(DataType.PIECE_LIST);
 
+        PeerInfo peerInfo = this.peers.get(peerAddress);
+
+        if (peerInfo == null) {
+            peerInfo = new PeerInfo(peerIp, peerPort, piecesList);
+            peers.put(peerAddress, peerInfo);
+            System.out.println("Novo peer adicionado: " + peerAddress);
+        } else {
+            peerInfo.getPieces().clear();
+            peerInfo.getPieces().addAll(piecesList);
+            peerInfo.setLastSeen(System.currentTimeMillis());
+            System.out.println("Peer atualizado: " + peerAddress + " com peças: " + piecesList);
+        }
     }
 
-    private void sendPeerList(String clientIp, int clientPort) {
-        // Constrói a string da lista de peers: PEER_LIST:TORRENT|IP1:PORTA1:PEÇA1,PEÇA2|IP2:PORTA2:PEÇA3...
-        String peerListStr = peers.values().stream()
-                .map(PeerInfo::toString)
-                .collect(Collectors.joining("|"));
+    private RequestMessage sendPeerList(RequestMessage request) {
+        String peerAddress = this.generateAddressFromRequest(request);
 
-        String responseMessage = "PEER_LIST:" + torrentName + "|" + peerListStr;
+        Map<String, PeerInfo> peers = this.peers.entrySet().stream()
+            .filter(entry -> !entry.getValue().getPeerAddress().equals(peerAddress))
+            .collect(Collectors.toMap(
+                    Map.Entry::getKey,
+                    Map.Entry::getValue
+            ));
 
-        try {
-            byte[] responseData = responseMessage.getBytes();
-            InetAddress address = InetAddress.getByName(clientIp);
-            DatagramPacket responsePacket = new DatagramPacket(responseData, responseData.length, address, clientPort);
-            this.socket.send(responsePacket);
-            System.out.println("Enviada lista de peers para " + clientIp + ":" + clientPort);
-        } catch (IOException e) {
-            System.err.println("Erro ao enviar lista de peers: " + e.getMessage());
-        }
+        RequestMessage requestMessage = new RequestMessage(peerAddress, RequestType.UPDATE_TRACKER);
+        requestMessage.getData().put(DataType.SUCCESS, true);
+        requestMessage.getData().put(DataType.PIECES_PER_PEER, peers);
+
+        System.out.println("Enviada lista de peers para: " + peerAddress);
+        return requestMessage;
+    }
+
+    private String generateAddressFromRequest(RequestMessage request) {
+        String peerIp = (String) request.getData().get(DataType.IP);
+        int peerPort = (int) request.getData().get(DataType.PORT);
+        return peerIp + ":" + peerPort;
     }
 }
