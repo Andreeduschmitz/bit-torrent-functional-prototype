@@ -1,8 +1,12 @@
 package org.bittorrent.tracker;
 
+import org.bittorrent.message.DataType;
+import org.bittorrent.message.RequestMessage;
 import org.bittorrent.peer.PeerInfo;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.ObjectInputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -15,7 +19,7 @@ import java.util.stream.Collectors;
 public class Tracker {
     private final int port;
     private DatagramSocket socket;
-    private final Map<String, Map<String, PeerInfo>> torrents = new ConcurrentHashMap<>();
+    private final Map<String, PeerInfo> peers = new ConcurrentHashMap<>();
 
     public Tracker(int port) {
         this.port = port;
@@ -31,11 +35,11 @@ public class Tracker {
             while (true) {
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 this.socket.receive(packet);
-                String message = new String(packet.getData(), 0, packet.getLength());
                 InetAddress clientAddress = packet.getAddress();
+                byte[] requestMessage = Arrays.copyOf(packet.getData(), packet.getLength());
                 int clientPort = packet.getPort();
 
-                handleMessage(message, clientAddress.getHostAddress(), clientPort);
+                handleMessage(requestMessage, clientAddress.getHostAddress(), clientPort);
             }
         } catch (IOException e) {
             System.err.println("Erro no Tracker: " + e.getMessage());
@@ -47,35 +51,39 @@ public class Tracker {
         }
     }
 
-    private void handleMessage(String message, String clientIp, int clientPort) {
-        System.out.println("Tracker recebeu de " + clientIp + ":" + clientPort + " -> " + message);
-        String[] parts = message.split(":", 3);
-        String command = parts[0];
-        String torrentName = parts[1];
+    private void handleMessage(byte[] requestMessage, String clientIp, int clientPort) {
+        System.out.println("Tracker recebeu uma requisição de " + clientIp + ":" + clientPort);
+        RequestMessage request;
 
-        // Garante que a estrutura de mapa para o torrent existe
-        this.torrents.putIfAbsent(torrentName, new ConcurrentHashMap<>());
+        try (ByteArrayInputStream bytes = new ByteArrayInputStream(requestMessage); ObjectInputStream in = new ObjectInputStream(bytes)) {
+            request = (RequestMessage) in.readObject();
+        } catch(Exception e) {
+            System.out.println("Erro ao receber a mensagem no Tracker: " + e.getMessage());
+            return;
+        }
 
-        switch (command) {
-            case "JOIN":
-                handleJoin(torrentName, clientIp, clientPort);
+        switch (request.getRequestType()) {
+            case JOIN_TRACKER:
+                handleJoin(request);
                 break;
-            case "UPDATE":
-                String piecesStr = (parts.length > 2) ? parts[2] : "";
-                handleUpdate(torrentName, clientIp, clientPort, piecesStr);
+            case UPDATE_TRACKER:
+                handleUpdate(request);
                 break;
+
+            default:
+                // Mensagem de erro
         }
     }
 
-    private void handleJoin(String torrentName, String clientIp, int clientPort) {
+    private void handleJoin(RequestMessage request) {
         // Quando um novo peer entra, ele pode ou não ter peças.
         // O primeiro 'join' é tratado como uma solicitação de lista.
         // A lógica de atualização cuidará de adicionar as peças.
-        sendPeerList(torrentName, clientIp, clientPort);
+        sendPeerList(request.get);
     }
 
-    private void handleUpdate(String torrentName, String clientIp, int clientPort, String piecesStr) {
-        Map<String, PeerInfo> peers = this.torrents.get(torrentName);
+    private void handleUpdate(RequestMessage request) {
+        Map<String, PeerInfo> peers = this.peers.get(torrentName);
         String peerAddress = clientIp + ":" + clientPort;
 
         Set<String> pieces = Arrays.stream(piecesStr.split(","))
@@ -100,11 +108,11 @@ public class Tracker {
         sendPeerList(torrentName, clientIp, clientPort);
     }
 
+    private void registerPeer(RequestMessage request) {
 
-    private void sendPeerList(String torrentName, String clientIp, int clientPort) {
-        Map<String, PeerInfo> peers = torrents.get(torrentName);
-        if (peers == null) return;
+    }
 
+    private void sendPeerList(String clientIp, int clientPort) {
         // Constrói a string da lista de peers: PEER_LIST:TORRENT|IP1:PORTA1:PEÇA1,PEÇA2|IP2:PORTA2:PEÇA3...
         String peerListStr = peers.values().stream()
                 .map(PeerInfo::toString)
