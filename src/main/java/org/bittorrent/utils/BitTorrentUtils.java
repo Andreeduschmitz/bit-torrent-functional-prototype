@@ -1,5 +1,8 @@
 package org.bittorrent.utils;
 
+import org.bittorrent.message.DataType;
+
+import java.util.Map;
 import java.util.Scanner;
 import java.util.regex.Pattern;
 
@@ -36,5 +39,10 @@ public class BitTorrentUtils {
                 System.out.println("Endereço IP inválido. Tente novamente.");
             }
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static  <T> T extractData(Map<DataType, Object> data, DataType dataType) {
+        return (T) data.get(dataType);
     }
 }
