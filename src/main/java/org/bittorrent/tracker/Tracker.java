@@ -10,47 +10,54 @@ import java.io.*;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.stream.Collectors;
 
 public class Tracker {
-    private final int port;
-    private DatagramSocket socket;
-    private final ScheduledExecutorService executor;
-    private final Map<String, PeerInfo> peersInfoMap = new ConcurrentHashMap<>();
 
     private static final String TRACKER_TAG = "[Tracker]: ";
 
-    public Tracker(int port) {
-        this.port = port;
+    private final int trackerPort;
+    private final String trackerIp;
+    private DatagramSocket trackerSocket;
+    private final ScheduledExecutorService executor;
+    private final Map<String, List<PeerInfo>> piecesInfoMap = new ConcurrentHashMap<>(); // Key:piece -> Value: List<PeerInfo>
+
+    public Tracker(int trackerPort) {
+        this.trackerPort = trackerPort;
+
+        try {
+            this.trackerIp = InetAddress.getLocalHost().getHostAddress();
+        } catch (UnknownHostException e) {
+            throw new RuntimeException(e);
+        }
+
         this.executor = Executors.newScheduledThreadPool(3);
     }
 
     public void start() {
-        System.out.println(TRACKER_TAG + "Tracker iniciado na porta " + port);
+        System.out.println(TRACKER_TAG + "Tracker iniciado na porta " + trackerPort);
 
         try {
-            this.socket = new DatagramSocket(port);
+            this.trackerSocket = new DatagramSocket(trackerPort);
             byte[] buffer = new byte[1024];
 
             // Loop de recepção das mensagens
-            while (!this.socket.isClosed()) {
+            while (!this.trackerSocket.isClosed()) {
                 DatagramPacket datagramPacket = new DatagramPacket(buffer, buffer.length);
-                this.socket.receive(datagramPacket);
+                this.trackerSocket.receive(datagramPacket);
                 this.executor.submit(() -> this.handleMessage(datagramPacket));
             }
         } catch (IOException e) {
             System.err.println(TRACKER_TAG + "Erro no socket: " + e.getMessage());
-            e.printStackTrace();
         } finally {
-            if (this.socket != null && !this.socket.isClosed()) {
-                this.socket.close();
+            if (this.trackerSocket != null && !this.trackerSocket.isClosed()) {
+                this.trackerSocket.close();
             }
         }
     }
@@ -69,8 +76,8 @@ public class Tracker {
 
             try (ByteArrayInputStream bytes = new ByteArrayInputStream(requestMessage); ObjectInputStream in = new ObjectInputStream(bytes)) {
                 request = (RequestMessage) in.readObject();
-            } catch(Exception e) {
-                System.out.println(TRACKER_TAG + "Erro ao receber a mensagem: " + e.getMessage());
+            } catch (Exception e) {
+                System.out.println(TRACKER_TAG + "Erro ao desserializar a mensagem: " + e.getMessage());
                 return;
             }
 
@@ -78,14 +85,13 @@ public class Tracker {
 
             switch (request.getRequestType()) {
                 case JOIN_TRACKER:
-                    response = this.handleJoin(request);
-                    break;
                 case UPDATE_TRACKER:
-                    response = this.handleUpdate(request);
+                    response = this.handleJoinOrUpdate(request);
                     break;
                 default:
                     System.out.println(TRACKER_TAG + "Recebeu uma requisição sem tipo definido do peer: " + clientAddress);
             }
+
 
             if (response != null) {
                 ByteArrayOutputStream byteOut = new ByteArrayOutputStream();
@@ -95,78 +101,49 @@ public class Tracker {
                 byte[] responseData = byteOut.toByteArray();
 
                 DatagramPacket responsePacket = new DatagramPacket(responseData, responseData.length, clientIp, clientPort);
-                socket.send(responsePacket);
+                trackerSocket.send(responsePacket);
             }
         } catch (Exception e){
             System.err.println(TRACKER_TAG + "Erro no processamento da mensagem: " + e.getMessage());
         }
     }
 
-    private RequestMessage handleJoin(RequestMessage request) {
-        this.registerPeer(request);
+    private RequestMessage handleJoinOrUpdate(RequestMessage request) {
+        this.registerOrUpdatePeerInfo(request);
         return this.sendPeerList(request);
     }
 
-    private RequestMessage handleUpdate(RequestMessage request) {
-        String peerAddress = this.generateAddressFromRequest(request);
-
+    private void registerOrUpdatePeerInfo(RequestMessage request) {
+        PeerInfo peerInfo = this.generatePeerInfoFromRequest(request);
         List<String> peerPieces = BitTorrentUtils.extractData(request.getData(), DataType.PIECE_LIST);
-        PeerInfo peerInfo = this.peersInfoMap.get(peerAddress);
 
-        if (peerInfo == null) {
-            this.registerPeer(request);
-        } else {
-            peerInfo.getPieces().clear();
-            peerInfo.getPieces().addAll(peerPieces);
-            peerInfo.setLastSeen(System.currentTimeMillis());
-            System.out.println(TRACKER_TAG + "Peer atualizado: " + peerAddress + " com peças: " + peerPieces);
+        for (String piece : peerPieces) {
+            List<PeerInfo> peersWithPiece = this.piecesInfoMap.get(piece);
+
+            if (peersWithPiece == null) {
+                this.piecesInfoMap.put(piece, List.of(peerInfo));
+            } else if (peersWithPiece.stream().noneMatch(peerInList -> peerInList.getPeerAddress() != null && peerInList.getPeerAddress().equals(peerInfo.getPeerAddress()))) {
+                peersWithPiece.add(peerInfo);
+            }
+
         }
 
-
-        return sendPeerList(request);
-    }
-
-    private void registerPeer(RequestMessage request) {
-        String peerIp = BitTorrentUtils.extractData(request.getData(), DataType.IP);
-        int peerPort = BitTorrentUtils.extractData(request.getData(), DataType.PORT);
-        String peerAddress = peerIp + ":" + peerPort;
-        Set<String> piecesList = BitTorrentUtils.extractData(request.getData(), DataType.PIECE_LIST);
-
-        PeerInfo peerInfo = this.peersInfoMap.get(peerAddress);
-
-        if (peerInfo == null) {
-            peerInfo = new PeerInfo(peerIp, peerPort, piecesList);
-            peersInfoMap.put(peerAddress, peerInfo);
-            System.out.println(TRACKER_TAG + "Novo peer adicionado: " + peerAddress);
-        } else {
-            peerInfo.getPieces().clear();
-            peerInfo.getPieces().addAll(piecesList);
-            peerInfo.setLastSeen(System.currentTimeMillis());
-            System.out.println(TRACKER_TAG + "Peer atualizado: " + peerAddress + " com peças: " + piecesList);
-        }
+        System.out.println(TRACKER_TAG + "Atualizando piecesInfoMap com os pedaços do peer: " + peerInfo.getPeerAddress());
     }
 
     private RequestMessage sendPeerList(RequestMessage request) {
-        String peerAddress = this.generateAddressFromRequest(request);
-
-        Map<String, PeerInfo> peers = this.peersInfoMap.entrySet().stream()
-            .filter(entry -> !entry.getValue().getPeerAddress().equals(peerAddress))
-            .collect(Collectors.toMap(
-                    Map.Entry::getKey,
-                    Map.Entry::getValue
-            ));
-
-        RequestMessage requestMessage = new RequestMessage(peerAddress, RequestType.UPDATE_TRACKER);
+        PeerInfo peerInfo = this.generatePeerInfoFromRequest(request);
+        RequestMessage requestMessage = new RequestMessage(this.trackerIp + ":" + this.trackerPort, RequestType.UPDATE_TRACKER);
         requestMessage.getData().put(DataType.SUCCESS, true);
-        requestMessage.getData().put(DataType.PIECES_PER_PEER, peers);
+        requestMessage.getData().put(DataType.PIECES_INFO_MAP, this.piecesInfoMap);
 
-        System.out.println(TRACKER_TAG + "Enviada lista de peers para: " + peerAddress);
+        System.out.println(TRACKER_TAG + "Enviada lista de peers para: " + peerInfo.getPeerAddress());
         return requestMessage;
     }
 
-    private String generateAddressFromRequest(RequestMessage request) {
+    private PeerInfo generatePeerInfoFromRequest(RequestMessage request) {
         String peerIp = BitTorrentUtils.extractData(request.getData(), DataType.IP);
         int peerPort = BitTorrentUtils.extractData(request.getData(), DataType.PORT);
-        return peerIp + ":" + peerPort;
+        return new PeerInfo(peerIp, peerPort);
     }
 }

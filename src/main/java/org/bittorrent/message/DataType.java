@@ -4,7 +4,7 @@ public enum DataType {
     IP,
     PORT,
     PIECE_LIST,
-    PIECES_PER_PEER,
+    PIECES_INFO_MAP,
     PIECE_NAME,
     PIECE_DATA,
     SUCCESS,

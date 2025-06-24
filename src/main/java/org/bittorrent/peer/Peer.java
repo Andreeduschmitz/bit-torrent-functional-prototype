@@ -11,22 +11,26 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 public class Peer {
-    private final String peerId;
+    private final String peerIp;
+    private final int peerPort;
     private final String trackerIp;
     private final int trackerPort;
-    private final int myPort; // Porta TCP para ouvir outros peers
-    private final String torrentName;
     private final Path filesDirectory;
     private final Set<String> myPieces = Collections.synchronizedSet(new HashSet<>());
     private final Map<String, List<String>> networkPieces = new HashMap<>(); // Pedaço -> Lista de IPs:PORTA
 
-    public Peer(String trackerIp, int trackerPort, int myPort, String torrentName, String directory) {
+    public Peer(String trackerIp, int trackerPort, int peerPort) {
         this.trackerIp = trackerIp;
         this.trackerPort = trackerPort;
-        this.myPort = myPort;
-        this.torrentName = torrentName;
-        this.filesDirectory = Paths.get(directory);
-        this.peerId = "Peer@" + myPort;
+        this.peerPort = peerPort;
+
+        try {
+            this.peerIp = InetAddress.getLocalHost().getHostAddress();
+        } catch (UnknownHostException e) {
+            throw new RuntimeException(e);
+        }
+
+        this.filesDirectory = Paths.get("Peer@" + peerIp + ":" + peerPort);
     }
 
     public void start() {
@@ -62,8 +66,8 @@ public class Peer {
 
     private void startServerThread() {
         new Thread(() -> {
-            try (ServerSocket serverSocket = new ServerSocket(this.myPort)) {
-                System.out.println("[" + this.peerId + "] Servidor P2P ouvindo na porta " + this.myPort);
+            try (ServerSocket serverSocket = new ServerSocket(this.peerPort)) {
+                System.out.println("[" + this.peerId + "] Servidor P2P ouvindo na porta " + this.peerPort);
                 while (true) {
                     Socket clientSocket = serverSocket.accept();
                     new Thread(() -> handlePeerRequest(clientSocket)).start();
@@ -203,7 +207,7 @@ public class Peer {
                 String peerAddress = peerInfo[0] + ":" + peerInfo[1];
 
                 // Ignora a si mesmo na lista
-                if (Integer.parseInt(peerInfo[1]) == this.myPort) {
+                if (Integer.parseInt(peerInfo[1]) == this.peerPort) {
                     continue;
                 }
 
