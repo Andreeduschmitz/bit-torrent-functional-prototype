@@ -1,5 +1,12 @@
 package org.bittorrent.peer;
 
+import org.bittorrent.connection.TCPConnection;
+import org.bittorrent.message.DataType;
+import org.bittorrent.message.RequestMessage;
+import org.bittorrent.message.RequestType;
+import org.bittorrent.utils.BitTorrentUtils;
+import org.bittorrent.utils.FileUtils;
+
 import java.io.*;
 import java.net.*;
 import java.nio.file.Files;
@@ -11,35 +18,44 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 public class Peer {
-    private final String peerIp;
-    private final int peerPort;
+
+    private static final String PEER_TAG = "[Peer]: ";
+    private static final String FILES_BASE_PATH = "./peerFiles/";
+    private static final int DOWNLOAD_SMALL_INTERVAL = 5000;
+    private static final int DOWNLOAD_BIG_INTERVAL = 10000;
+
+    private final PeerInfo peerInfo;
     private final String trackerIp;
     private final int trackerPort;
     private final Path filesDirectory;
-    private final Set<String> myPieces = Collections.synchronizedSet(new HashSet<>());
-    private final Map<String, List<String>> networkPieces = new HashMap<>(); // Pedaço -> Lista de IPs:PORTA
+    private final Set<String> peerPieces = Collections.synchronizedSet(new HashSet<>());
+    private final Map<String, List<PeerInfo>> piecesInfoMap = new HashMap<>();//Key:piece -> Value: List<PeerInfo>
+    private final ScheduledExecutorService executor;
+    private final Object downloadStrategyLock = new Object();
+    private Boolean isFirstDownloadExecution = true;
 
     public Peer(String trackerIp, int trackerPort, int peerPort) {
         this.trackerIp = trackerIp;
         this.trackerPort = trackerPort;
-        this.peerPort = peerPort;
 
         try {
-            this.peerIp = InetAddress.getLocalHost().getHostAddress();
+            String peerIp = InetAddress.getLocalHost().getHostAddress();
+            this.peerInfo = new PeerInfo(peerIp, peerPort);
         } catch (UnknownHostException e) {
             throw new RuntimeException(e);
         }
 
-        this.filesDirectory = Paths.get("Peer@" + peerIp + ":" + peerPort);
+        this.filesDirectory = Paths.get("Peer_" + this.peerInfo.getPeerAddress());
+        this.executor = Executors.newScheduledThreadPool(3);
     }
 
     public void start() {
-        System.out.println("[" + peerId + "] iniciando...");
+        System.out.println(PEER_TAG + "Iniciando peer " + this.peerInfo.getPeerAddress());
         this.createFilesDirectory();
-        this.scanInitialPieces();
-        this.startServerThread();
+        this.scanPiecesFromDirectory();
+        this.executor.submit(this::startServer);
         this.startTrackerUpdater();
-        this.startDownloader();
+        this.executor.submit(this::startDownloader);
     }
 
     private void createFilesDirectory() {
@@ -52,226 +68,219 @@ public class Peer {
         }
     }
 
-    private void scanInitialPieces() {
+    private void scanPiecesFromDirectory() {
         try {
             Files.list(this.filesDirectory)
                     .map(path -> path.getFileName().toString())
-                    .filter(fileName -> fileName.startsWith(this.torrentName + "_"))
-                    .forEach(this.myPieces::add);
-            System.out.println("[" + this.peerId + "] Peças iniciais: " + this.myPieces);
+                    .forEach(this.peerPieces::add);
+
+            System.out.println(PEER_TAG + "Peças do diretório atualizadas. Contendo: " + this.peerPieces);
         } catch (IOException e) {
-            System.err.println("[" + this.peerId + "] Erro ao escanear peças iniciais: " + e.getMessage());
+            System.err.println(PEER_TAG + "Erro ao escanear diretório de peças: " + e.getMessage());
         }
     }
 
-    private void startServerThread() {
-        new Thread(() -> {
-            try (ServerSocket serverSocket = new ServerSocket(this.peerPort)) {
-                System.out.println("[" + this.peerId + "] Servidor P2P ouvindo na porta " + this.peerPort);
-                while (true) {
-                    Socket clientSocket = serverSocket.accept();
-                    new Thread(() -> handlePeerRequest(clientSocket)).start();
-                }
-            } catch (IOException e) {
-                System.err.println("[" + this.peerId + "] Erro no servidor P2P: " + e.getMessage());
-            }
-        }).start();
-    }
+    private void startServer() {
+        try (ServerSocket serverSocket = new ServerSocket(this.peerInfo.getPort())) {
+            System.out.println(PEER_TAG + "Servidor ouvindo na porta " + this.peerInfo.getPort());
 
-    // Lógica para enviar um pedaço para outro peer
-    private void handlePeerRequest(Socket clientSocket) {
-        try (BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-             OutputStream out = clientSocket.getOutputStream()) {
-
-            String request = in.readLine(); // Formato: "DOWNLOAD:NOME_DA_PECA"
-            if (request != null && request.startsWith("DOWNLOAD:")) {
-                String pieceName = request.substring(9);
-                System.out.println("[" + this.peerId + "] Recebeu solicitação de download para: " + pieceName);
-
-                if (this.myPieces.contains(pieceName)) {
-                    Path piecePath = this.filesDirectory.resolve(pieceName);
-                    if (Files.exists(piecePath)) {
-                        byte[] fileContent = Files.readAllBytes(piecePath);
-                        out.write(fileContent);
-                        out.flush();
-                        System.out.println("[" + this.peerId + "] Enviou a peça " + pieceName + " para " + clientSocket.getRemoteSocketAddress());
-                    }
-                }
+            while (true) {
+                Socket socket = serverSocket.accept();
+                this.executor.submit(() -> this.handleMessage(socket));
             }
         } catch (IOException e) {
-            System.err.println("[" + this.peerId + "] Erro ao lidar com a solicitação do peer: " + e.getMessage());
-        } finally {
-            try {
-                clientSocket.close();
-            } catch (IOException e) {
-                System.out.println("Erro ao fechar o socket do servidor P2P: " + e.getMessage());
-            }
+            System.err.println(PEER_TAG + "Erro no servidor: " + e.getMessage());
         }
     }
 
-    // 3. Inicia o agendador para enviar updates para o Tracker
+    // Lógica recepção de mensagens entre peers
+    private void handleMessage(Socket socket) {
+        TCPConnection connection;
+
+        try {
+            connection = new TCPConnection(socket);
+        } catch (IOException e) {
+            System.err.println(PEER_TAG + "Erro ao receber a mensagem: " + e.getMessage());
+            return;
+        }
+
+        RequestMessage request;
+
+        try {
+            request = connection.receiveMessage();
+        } catch (Exception e) {
+            System.err.println(PEER_TAG + "Erro ao desserializar a mensagem: " + e.getMessage());
+            return;
+        }
+
+        if (request == null) {
+            System.out.println(PEER_TAG + "Mensagem nula após desserialização");
+            return;
+        }
+
+        RequestMessage response = null;
+
+        switch (request.getRequestType()) {
+            case PIECE_REQUEST:
+                response = this.sharePiece(request);
+                break;
+            default:
+                response = null; //aqui gera um resposta de erro
+        }
+
+        connection.sendMessage(response);
+    }
+
+    private RequestMessage sharePiece(RequestMessage request) {
+        String pieceName = BitTorrentUtils.extractData(request.getData(), DataType.PIECE_NAME);
+        PeerInfo peerInfoFromRequest = BitTorrentUtils.generatePeerInfoFromRequest(request);
+
+        if (!this.peerPieces.contains(pieceName)) {
+            //Retorna um erro
+            return null;
+        }
+
+        try {
+            byte[] fileData = FileUtils.readBytesFromFile(this.buildFilepath(pieceName));
+
+            RequestMessage message = new RequestMessage(this.peerInfo.getPeerAddress(), RequestType.PIECE_RESPONSE);
+            message.getData().put(DataType.SUCCESS, true);
+            message.getData().put(DataType.PIECE_NAME, pieceName);
+            message.getData().put(DataType.PIECE_DATA, fileData);
+
+            return message;
+        } catch (IOException e) {
+            System.err.println(PEER_TAG + "Erro ao compartilhar o pedaço " + pieceName + " com o peer " + peerInfoFromRequest.getPeerAddress() + e.getMessage());
+            //Retorna um erro
+            return null;
+        }
+    }
+
     private void startTrackerUpdater() {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        // Envia a lista de peças a cada 30 segundos
         scheduler.scheduleAtFixedRate(this::sendUpdateToTracker, 0, 30, TimeUnit.SECONDS);
     }
 
     private void sendUpdateToTracker() {
         try (DatagramSocket socket = new DatagramSocket()) {
-            String piecesStr = String.join(",", this.myPieces);
-            String message = "UPDATE:" + this.torrentName + ":" + piecesStr;
-            byte[] buffer = message.getBytes();
+            socket.setSoTimeout(TCPConnection.CONNECTION_TIMEOUT_MS);
+            RequestMessage request = new RequestMessage(this.peerInfo.getPeerAddress(), RequestType.UPDATE_TRACKER);
+            request.getData().put(DataType.PIECE_LIST, this.peerPieces);
 
-            InetAddress trackerAddress = InetAddress.getByName(this.trackerIp);
-            DatagramPacket packet = new DatagramPacket(buffer, buffer.length, trackerAddress, this.trackerPort);
-            socket.send(packet);
+            ByteArrayOutputStream byteOut = new ByteArrayOutputStream();
+            ObjectOutputStream out = new ObjectOutputStream(byteOut);
+            out.writeObject(request);
 
-            System.out.println("[" + this.peerId + "] Enviou update para o Tracker: " + message);
-        } catch (IOException e) {
-            System.err.println("[" + this.peerId + "] Erro ao enviar update para o Tracker: " + e.getMessage());
+            byte[] data = byteOut.toByteArray();
+            InetAddress ip = InetAddress.getByName(this.trackerIp);
+            DatagramPacket sendPackage = new DatagramPacket(data, data.length, ip, trackerPort);
+            socket.send(sendPackage);
+
+            System.out.println(PEER_TAG + "Envio de pedaços para o Tracker realizado com sucesso. Aguardando lista do Tracker atualizada.");
+
+            byte[] receiveBuffer = new byte[65535];
+            DatagramPacket receivePacket = new DatagramPacket(receiveBuffer, receiveBuffer.length);
+            socket.receive(receivePacket);
+
+            ByteArrayInputStream byteIn = new ByteArrayInputStream(receivePacket.getData(), 0, receivePacket.getLength());
+            ObjectInputStream in = new ObjectInputStream(byteIn);
+
+            RequestMessage requestMessage = (RequestMessage) in.readObject();
+            this.piecesInfoMap.clear();
+            this.piecesInfoMap.putAll(BitTorrentUtils.extractData(requestMessage.getData(), DataType.PIECES_INFO_MAP));
+
+            System.out.println(PEER_TAG + "piecesInfoMap atualizado com a lista Tracker.");
+        } catch (Exception e) {
+            System.err.println(PEER_TAG + "Erro ao enviar update para o Tracker: " + e.getMessage());
         }
     }
 
-    // 4. Inicia a lógica de download
     private void startDownloader() {
-        new Thread(() -> {
-            try {
-                while(true) { // Loop para continuar baixando peças
-                    getPeerListFromTracker(); // Atualiza a lista de peças da rede
-                    String rarestPiece = findRarestMissingPiece();
+        try {
+            while(true) {
+                String pieceName;
 
-                    if (rarestPiece != null) {
-                        System.out.println("[" + this.peerId + "] Peça mais rara a ser baixada: " + rarestPiece);
-                        List<String> peersWithPiece = this.networkPieces.get(rarestPiece);
-
-                        // Escolhe um peer aleatório que tenha a peça
-                        String targetPeerAddress = peersWithPiece.get(new Random().nextInt(peersWithPiece.size()));
-
-                        downloadPiece(targetPeerAddress, rarestPiece);
-                    } else {
-                        System.out.println("[" + this.peerId + "] Nenhuma peça nova para baixar no momento. Aguardando...");
-                        // Se não houver nada para baixar, aguarda antes de verificar novamente
-                        Thread.sleep(15000);
-                    }
-                    // Espera um pouco antes de tentar o próximo download
-                    Thread.sleep(5000);
+                synchronized(this.downloadStrategyLock) {
+                    pieceName = isFirstDownloadExecution ? this.findRarestMissingPiece() : this.findRandomMissingPiece();
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                System.err.println("[" + this.peerId + "] Thread de download interrompida.");
-            }
-        }).start();
-    }
 
-    // Pede a lista de peers ao Tracker via UDP
-    private void getPeerListFromTracker() {
-        try (DatagramSocket socket = new DatagramSocket()) {
-            socket.setSoTimeout(5000); // Timeout de 5 segundos
-
-            String message = "JOIN:" + this.torrentName;
-            byte[] buffer = message.getBytes();
-
-            InetAddress trackerAddress = InetAddress.getByName(this.trackerIp);
-            DatagramPacket packet = new DatagramPacket(buffer, buffer.length, trackerAddress, this.trackerPort);
-            socket.send(packet);
-
-            // Espera a resposta do Tracker
-            byte[] responseBuffer = new byte[2048];
-            DatagramPacket responsePacket = new DatagramPacket(responseBuffer, responseBuffer.length);
-            socket.receive(responsePacket);
-
-            String response = new String(responsePacket.getData(), 0, responsePacket.getLength());
-            parsePeerList(response);
-
-        } catch (SocketTimeoutException e) {
-            System.err.println("[" + peerId + "] Timeout ao contatar o Tracker. Tentando novamente...");
-        } catch (IOException e) {
-            System.err.println("[" + peerId + "] Erro ao obter lista de peers do Tracker: " + e.getMessage());
-        }
-    }
-
-    // Processa a resposta do Tracker
-    private void parsePeerList(String response) {
-        // Formato: PEER_LIST:TORRENT|IP1:PORTA1:PEÇA1,PEÇA2|IP2:PORTA2:PEÇA3...
-        if (!response.startsWith("PEER_LIST:")) return;
-
-        synchronized (this.networkPieces) {
-            this.networkPieces.clear();
-            String[] parts = response.split("\\|");
-            // parts[0] é PEER_LIST:TORRENT, então começamos do 1
-            for (int i = 1; i < parts.length; i++) {
-                String peerData = parts[i];
-                String[] peerInfo = peerData.split(":", 3);
-                if (peerInfo.length < 2) continue;
-
-                String peerAddress = peerInfo[0] + ":" + peerInfo[1];
-
-                // Ignora a si mesmo na lista
-                if (Integer.parseInt(peerInfo[1]) == this.peerPort) {
+                // Se não houver nada para baixar, aguarda antes de verificar novamente
+                if (pieceName == null) {
+                    System.out.println(PEER_TAG + "Nenhuma peça nova para baixar no momento. Realizará a tentativa novamente em: ");
+                    Thread.sleep(DOWNLOAD_BIG_INTERVAL);
                     continue;
                 }
 
-                if (peerInfo.length > 2 && !peerInfo[2].isEmpty()) {
-                    String[] pieces = peerInfo[2].split(",");
-                    for (String piece : pieces) {
-                        networkPieces.putIfAbsent(piece, new ArrayList<>());
-                        networkPieces.get(piece).add(peerAddress);
-                    }
-                }
+                System.out.println(PEER_TAG + "Peça mais rara a ser baixada: " + pieceName);
+                List<PeerInfo> peersWithPiece = this.piecesInfoMap.get(pieceName);
+                PeerInfo chosenPeer = peersWithPiece.get(new Random().nextInt(peersWithPiece.size()));
+
+                this.downloadPiece(chosenPeer, pieceName);
+                Thread.sleep(DOWNLOAD_BIG_INTERVAL);
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.err.println(PEER_TAG + "Thread de download interrompida.");
         }
-        System.out.println("[" + this.peerId + "] Visão da rede atualizada: " + this.networkPieces);
     }
 
-    // Algoritmo para encontrar a peça mais rara que eu não possuo
+    private String findRandomMissingPiece() {
+        synchronized(this.piecesInfoMap) {
+            List<String> missingPieces = this.piecesInfoMap.keySet().stream()
+                    .filter(piece -> !this.peerPieces.contains(piece))
+                    .toList();
+
+            if (missingPieces.isEmpty()) {
+                return null;
+            }
+
+            int randomIndex = new Random().nextInt(missingPieces.size());
+            return missingPieces.get(randomIndex);
+        }
+    }
+
+
     private String findRarestMissingPiece() {
-        synchronized(this.networkPieces) {
-            return this.networkPieces.entrySet().stream()
-                    // Filtra apenas as peças que eu não tenho
-                    .filter(entry -> !this.myPieces.contains(entry.getKey()))
-                    // Encontra a peça com o menor número de peers (mais rara)
+        synchronized(this.piecesInfoMap) {
+            return this.piecesInfoMap.entrySet().stream()
+                    .filter(entry -> !this.peerPieces.contains(entry.getKey()))
                     .min(Comparator.comparingInt(entry -> entry.getValue().size()))
-                    // Mapeia para o nome da peça
                     .map(Map.Entry::getKey)
-                    // Retorna a peça ou null se não houver nenhuma
                     .orElse(null);
         }
     }
 
-    // Lógica de cliente TCP para baixar uma peça
-    private void downloadPiece(String peerAddress, String pieceName) {
-        String[] parts = peerAddress.split(":");
-        String ip = parts[0];
-        int port = Integer.parseInt(parts[1]);
 
-        System.out.println("[" + this.peerId + "] Tentando baixar " + pieceName + " de " + peerAddress);
+    private void downloadPiece(PeerInfo recipientPeer, String pieceName) {
+        synchronized(this.downloadStrategyLock) {
+            this.isFirstDownloadExecution = false;
+        }
 
-        try (Socket socket = new Socket(ip, port);
-             PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
-             InputStream in = socket.getInputStream()) {
+        try (Socket socket = new Socket(recipientPeer.getIp(), recipientPeer.getPort());
+             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+             ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
 
-            // 1. Envia a solicitação de download
-            out.println("DOWNLOAD:" + pieceName);
+            RequestMessage requestMessage = new RequestMessage(this.peerInfo.getPeerAddress(), RequestType.PIECE_REQUEST);
+            requestMessage.getData().put(DataType.PIECE_NAME, pieceName);
 
-            // 2. Lê a resposta (o conteúdo do arquivo)
-            byte[] fileContent = in.readAllBytes();
-            if (fileContent.length > 0) {
-                // 3. Salva o arquivo no diretório
-                Path newFilePath = this.filesDirectory.resolve(pieceName);
-                Files.write(newFilePath, fileContent);
+            out.writeObject(requestMessage);
+            RequestMessage response = (RequestMessage) in.readObject();
 
-                // 4. Adiciona a peça à lista de peças que possuo
-                this.myPieces.add(pieceName);
-                System.out.println("[" + this.peerId + "] SUCESSO: Peça " + pieceName + " baixada e salva.");
-
-                // 5. Envia um update imediato para o Tracker
-                sendUpdateToTracker();
-            } else {
-                System.err.println("[" + this.peerId + "] FALHA: Recebeu 0 bytes para " + pieceName + " de " + peerAddress);
+            if (response.getRequestType() != RequestType.PIECE_RESPONSE) {
+                System.err.println(PEER_TAG + "O Peer " + recipientPeer.getPeerAddress() + " falhou em enviar arquivo " + pieceName);
+                return;
             }
 
-        } catch (IOException e) {
-            System.err.println("[" + this.peerId + "] FALHA ao baixar " + pieceName + " de " + peerAddress + ": " + e.getMessage());
+            FileUtils.createFileFromBytes(buildFilepath(pieceName), BitTorrentUtils.extractData(requestMessage.getData(), DataType.PIECE_DATA));
+            this.scanPiecesFromDirectory();
+
+            System.out.println(PEER_TAG + "Pedaço " + pieceName + " obtido com sucesso de " + recipientPeer.getPeerAddress());
+        } catch (Exception e) {
+            System.err.println(PEER_TAG +"Erro ao solicitar pedaço ao peer " + recipientPeer.getPeerAddress() + ": " + e.getMessage());
         }
+    }
+
+    private String buildFilepath(String fileName) {
+        return Paths.get(FILES_BASE_PATH + this.filesDirectory, fileName).toString();
     }
 }

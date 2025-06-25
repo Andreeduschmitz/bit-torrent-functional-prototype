@@ -26,7 +26,7 @@ public class Tracker {
     private final String trackerIp;
     private DatagramSocket trackerSocket;
     private final ScheduledExecutorService executor;
-    private final Map<String, List<PeerInfo>> piecesInfoMap = new ConcurrentHashMap<>(); // Key:piece -> Value: List<PeerInfo>
+    private final Map<String, List<PeerInfo>> piecesInfoMap = new ConcurrentHashMap<>();// Key:piece -> Value: List<PeerInfo>
 
     public Tracker(int trackerPort) {
         this.trackerPort = trackerPort;
@@ -114,7 +114,7 @@ public class Tracker {
     }
 
     private void registerOrUpdatePeerInfo(RequestMessage request) {
-        PeerInfo peerInfo = this.generatePeerInfoFromRequest(request);
+        PeerInfo peerInfo = BitTorrentUtils.generatePeerInfoFromRequest(request);
         List<String> peerPieces = BitTorrentUtils.extractData(request.getData(), DataType.PIECE_LIST);
 
         for (String piece : peerPieces) {
@@ -132,18 +132,12 @@ public class Tracker {
     }
 
     private RequestMessage sendPeerList(RequestMessage request) {
-        PeerInfo peerInfo = this.generatePeerInfoFromRequest(request);
+        PeerInfo peerInfo = BitTorrentUtils.generatePeerInfoFromRequest(request);
         RequestMessage requestMessage = new RequestMessage(this.trackerIp + ":" + this.trackerPort, RequestType.UPDATE_TRACKER);
         requestMessage.getData().put(DataType.SUCCESS, true);
         requestMessage.getData().put(DataType.PIECES_INFO_MAP, this.piecesInfoMap);
 
         System.out.println(TRACKER_TAG + "Enviada lista de peers para: " + peerInfo.getPeerAddress());
         return requestMessage;
-    }
-
-    private PeerInfo generatePeerInfoFromRequest(RequestMessage request) {
-        String peerIp = BitTorrentUtils.extractData(request.getData(), DataType.IP);
-        int peerPort = BitTorrentUtils.extractData(request.getData(), DataType.PORT);
-        return new PeerInfo(peerIp, peerPort);
     }
 }

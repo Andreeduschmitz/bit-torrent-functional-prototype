@@ -1,6 +1,8 @@
 package org.bittorrent.utils;
 
 import org.bittorrent.message.DataType;
+import org.bittorrent.message.RequestMessage;
+import org.bittorrent.peer.PeerInfo;
 
 import java.util.Map;
 import java.util.Scanner;
@@ -39,6 +41,12 @@ public class BitTorrentUtils {
                 System.out.println("Endereço IP inválido. Tente novamente.");
             }
         }
+    }
+
+    public static PeerInfo generatePeerInfoFromRequest(RequestMessage request) {
+        String peerIp = BitTorrentUtils.extractData(request.getData(), DataType.IP);
+        int peerPort = BitTorrentUtils.extractData(request.getData(), DataType.PORT);
+        return new PeerInfo(peerIp, peerPort);
     }
 
     @SuppressWarnings("unchecked")

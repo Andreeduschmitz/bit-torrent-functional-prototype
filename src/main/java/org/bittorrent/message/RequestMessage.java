@@ -6,18 +6,18 @@ import java.util.Map;
 
 public class RequestMessage implements Serializable {
 
-    private final String sender;
+    private final String senderAddress;
     private final RequestType requestType;
     private final Map<DataType, Object> data;
 
-    public RequestMessage(String sender, RequestType requestType) {
-        this.sender = sender;
+    public RequestMessage(String senderAddress, RequestType requestType) {
+        this.senderAddress = senderAddress;
         this.requestType = requestType;
         this.data = new HashMap<>();
     }
 
-    public String getSender() {
-        return sender;
+    public String getSenderAddress() {
+        return senderAddress;
     }
 
     public RequestType getRequestType() {
