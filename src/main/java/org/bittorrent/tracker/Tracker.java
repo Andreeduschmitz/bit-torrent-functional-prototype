@@ -90,7 +90,7 @@ public class Tracker {
                     response = this.handleJoinOrUpdate(request);
                     break;
                 default:
-                    this.log("Recebeu uma requisição sem tipo definido do peer: " + clientAddress, false);
+                    this.log("Recebeu uma requisição sem tipo definido do Peer: " + clientAddress, false);
             }
 
 

@@ -54,7 +54,7 @@ public class Peer {
     }
 
     public void start() {
-        this.log("Iniciando peer " + this.peerInfo.getPeerAddress(), false);
+        this.log("Iniciando Peer " + this.peerInfo.getPeerAddress(), false);
         this.createFilesDirectory();
         this.executor.submit(this::startServer);
         this.startTrackerUpdater();
@@ -66,7 +66,7 @@ public class Peer {
             try {
                 Files.createDirectories(this.filesDirectory);
             } catch (IOException e) {
-                throw new RuntimeException("Não foi possível criar o diretório de arquivos do peer", e);
+                throw new RuntimeException("Não foi possível criar o diretório de arquivos do Peer", e);
             }
         }
     }
@@ -79,9 +79,9 @@ public class Peer {
                     .map(path -> path.getFileName().toString())
                     .forEach(this.peerPieces::add);
 
-            this.log("Peças do diretório atualizadas. Contendo: " + this.peerPieces, false);
+            this.log("Pedaços do diretório atualizadas. Contendo: " + this.peerPieces, false);
         } catch (IOException e) {
-            this.log("Erro ao escanear diretório de peças: " + e.getMessage(), true);
+            this.log("Erro ao escanear diretório de pedaços: " + e.getMessage(), true);
         }
     }
 
@@ -141,7 +141,7 @@ public class Peer {
         PeerInfo peerInfoFromRequest = BitTorrentUtils.generatePeerInfoFromRequest(request);
 
         if (!this.peerPieces.contains(pieceName)) {
-            this.log("O peer " + this.peerInfo.getPeerAddress() + " recebeu uma solicitação do pedaço " + pieceName + " porém não contém o mesmo", false);
+            this.log("O peer " + this.peerInfo.getPeerAddress() + " recebeu uma solicitação do pedaço " + pieceName + " porém não contém o mesmo.", false);
             return this.buildErrorResponseMessage("O peer solicitado não possui o pedaço solicitado.");
         }
 
@@ -197,7 +197,7 @@ public class Peer {
             this.piecesInfoMap.clear();
             this.piecesInfoMap.putAll(BitTorrentUtils.extractData(requestMessage.getData(), DataType.PIECES_INFO_MAP));
 
-            this.log("piecesInfoMap atualizado com a lista Tracker.", false);
+            this.log("Referência da lista do Tracker atualizada!.", false);
         } catch (Exception e) {
             this.log("Erro ao enviar update para o Tracker: " + e.getMessage(), true);
         }
@@ -214,12 +214,12 @@ public class Peer {
                 }
 
                 if (pieceName == null) {
-                    this.log("Nenhuma peça nova para baixar no momento. Tentando novamente em " + (DOWNLOAD_BIG_INTERVAL / 1000) + " segundos.", false);
+                    this.log("Nenhum pedaço novo para baixar no momento. Tentando novamente em " + (DOWNLOAD_BIG_INTERVAL / 1000) + " segundos.", false);
                     Thread.sleep(DOWNLOAD_BIG_INTERVAL);
                     continue;
                 }
 
-                this.log("Tentando baixar a peça: " + pieceName, false);
+                this.log("Inicio tentativa de baixar o pedaço: " + pieceName, false);
                 List<PeerInfo> peersWithPiece = this.piecesInfoMap.get(pieceName);
 
                 List<PeerInfo> eligiblePeers = peersWithPiece.stream()
@@ -227,7 +227,7 @@ public class Peer {
                         .toList();
 
                 if (eligiblePeers.isEmpty()) {
-                    this.log("Nenhum peer elegível encontrado para a peça '" + pieceName + "'. Procurando outra peça.", false);
+                    this.log("Nenhum peer elegível encontrado para o pedaço " + pieceName, false);
                     Thread.sleep(1000);
                     continue;
                 }
@@ -235,7 +235,7 @@ public class Peer {
                 int randomIndex = ThreadLocalRandom.current().nextInt(eligiblePeers.size());
                 PeerInfo chosenPeer = eligiblePeers.get(randomIndex);
 
-                this.log("Peer escolhido para download da peça '" + pieceName + "': " + chosenPeer.getPeerAddress(), false);
+                this.log( chosenPeer.getPeerAddress() + " foi o peer escolhido para download do pedaço " + pieceName, false);
                 this.downloadPiece(chosenPeer, pieceName);
 
                 Thread.sleep(DOWNLOAD_SMALL_INTERVAL);
@@ -291,7 +291,7 @@ public class Peer {
             RequestMessage response = (RequestMessage) in.readObject();
 
             if (response == null || response.getRequestType() != RequestType.PIECE_RESPONSE) {
-                this.log("O Peer " + recipientPeer.getPeerAddress() + " falhou em enviar arquivo " + pieceName, true);
+                this.log("O Peer " + recipientPeer.getPeerAddress() + " falhou em enviar o pedaço " + pieceName, true);
                 return;
             }
 
@@ -299,7 +299,7 @@ public class Peer {
             String errormessage = BitTorrentUtils.extractData(response.getData(), DataType.MESSAGE);
 
             if (success == null || !success) {
-                this.log("O Peer " + recipientPeer.getPeerAddress() + " falhou em enviar arquivo " + pieceName + ". Motivo: " + errormessage, true);
+                this.log("O Peer " + recipientPeer.getPeerAddress() + " falhou em enviar o pedaço " + pieceName + ". Motivo: " + errormessage, true);
                 return;
             }
 
