@@ -10,7 +10,8 @@ public class PeerMain {
         Scanner scanner = new Scanner(System.in);
 
         System.out.println("Insira o IP do Tracker:");
-        String trackerIp = BitTorrentUtils.requestIp(scanner);
+        // String trackerIp = BitTorrentUtils.requestIp(scanner);
+        String trackerIp = "192.168.0.26";
         int trackerPort = TrackerMain.TRACKER_PORT;
         System.out.println("Insira a porta na qual deseja iniciar o Peer:");
         int peerPort = BitTorrentUtils.requestPort(scanner);

@@ -8,5 +8,5 @@ public enum DataType {
     PIECE_NAME,
     PIECE_DATA,
     SUCCESS,
-    REASON;
+    MESSAGE;
 }

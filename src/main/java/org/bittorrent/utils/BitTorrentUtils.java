@@ -4,6 +4,12 @@ import org.bittorrent.message.DataType;
 import org.bittorrent.message.RequestMessage;
 import org.bittorrent.peer.PeerInfo;
 
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
+import java.util.Collections;
+import java.util.Enumeration;
 import java.util.Map;
 import java.util.Scanner;
 import java.util.regex.Pattern;
@@ -41,6 +47,22 @@ public class BitTorrentUtils {
                 System.out.println("Endereço IP inválido. Tente novamente.");
             }
         }
+    }
+
+    public static String getLocalIPv4() throws SocketException {
+        Enumeration<NetworkInterface> nics = NetworkInterface.getNetworkInterfaces();
+
+        while (nics.hasMoreElements()) {
+            NetworkInterface nic = nics.nextElement();
+            if (nic.isUp() && !nic.isLoopback()) {
+                for (InetAddress addr : Collections.list(nic.getInetAddresses())) {
+                    if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
+                        return addr.getHostAddress();
+                    }
+                }
+            }
+        }
+        throw new RuntimeException("Não encontrou IP de rede local");
     }
 
     public static PeerInfo generatePeerInfoFromRequest(RequestMessage request) {

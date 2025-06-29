@@ -14,6 +14,7 @@ public class RequestMessage implements Serializable {
         this.senderAddress = senderAddress;
         this.requestType = requestType;
         this.data = new HashMap<>();
+        this.data.put(DataType.SUCCESS, true);
     }
 
     public String getSenderAddress() {

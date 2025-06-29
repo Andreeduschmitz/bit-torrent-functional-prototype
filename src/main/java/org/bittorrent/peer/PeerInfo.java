@@ -1,8 +1,8 @@
 package org.bittorrent.peer;
 
-import java.util.Set;
+import java.io.Serializable;
 
-public class PeerInfo {
+public class PeerInfo implements Serializable {
     private final String peerAddress;
     private final String ip;
     private final int port;
