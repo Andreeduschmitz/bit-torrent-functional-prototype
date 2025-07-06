@@ -49,7 +49,7 @@ public class Peer {
             throw new RuntimeException(e);
         }
 
-        this.filesDirectory = Paths.get(FILES_BASE_PATH + "Peer_" + this.peerInfo.getPeerAddress());
+        this.filesDirectory = Paths.get(FILES_BASE_PATH + "Peer_" + this.peerInfo.getIp() + "_" + this.peerInfo.getPort());
         this.executor = Executors.newScheduledThreadPool(3);
     }
 
@@ -168,7 +168,7 @@ public class Peer {
     private void sendUpdateToTracker() {
         this.scanPiecesFromDirectory();
 
-        try (DatagramSocket socket = new DatagramSocket()) {
+        try (DatagramSocket socket = new DatagramSocket(this.peerInfo.getPort())) {
             socket.setSoTimeout(TCPConnection.CONNECTION_TIMEOUT_MS);
             RequestMessage request = new RequestMessage(this.peerInfo.getPeerAddress(), RequestType.UPDATE_TRACKER);
             request.getData().put(DataType.IP, this.peerInfo.getIp());
